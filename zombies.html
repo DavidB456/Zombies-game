@@ -1228,7 +1228,7 @@
         hurtThreshold: 4,
         hurtWindow: 6.0,
         regenRate: 40,
-        eyeHeight: 1.65,
+        eyeHeight: 1.85,
         crouchEye: 0.85
       },
       move: {
@@ -1247,7 +1247,10 @@
         friction: 14,
         jump: 7.2,
         slideJump: 7.6,
-        gravity: 18.5
+        gravity: 18.5,
+        staminaDrain: 0.25,
+        staminaRegen: 0.25,
+        staminaResume: 0.5
       },
       zombie: {
         maxAlive: 24,
@@ -1368,6 +1371,7 @@
       sprint: 'ShiftLeft',
       jump: 'Space',
       slide: 'KeyC',
+      crouchToggle: 'ControlLeft',
       reload: 'KeyR',
       knife: 'KeyV',
       grenade: 'KeyG',
@@ -1383,7 +1387,8 @@
       right: 'Strafe Right',
       sprint: 'Sprint (hold)',
       jump: 'Jump',
-      slide: 'Slide / Crouch',
+      slide: 'Slide (while sprinting)',
+      crouchToggle: 'Crouch Toggle',
       reload: 'Reload',
       knife: 'Knife',
       grenade: 'Throw Frag',
@@ -2187,6 +2192,8 @@
         jumpBuffer: 0,
         coyote: 0,
         landDip: 0,
+        stamina: 1.0,
+        staminaDrained: false,
         lastFwdTap: -1,
         fireCooldown: 0,
         knifeCd: 0,
@@ -2751,6 +2758,9 @@
         if (e.code === KEYS.grenade) throwGrenade(me);
         if (e.code === KEYS.slide) tryStartSlide();
         if (e.code === KEYS.jump) me.jumpBuffer = 0.15;
+        if (KEYS.crouchToggle && e.code === KEYS.crouchToggle && !me.down && me.moveState !== 'slide') {
+          me.crouch = !me.crouch;
+        }
       });
       document.addEventListener('keyup', e => {
         keys[e.code] = false;
@@ -2774,6 +2784,24 @@
             slideCancel();
           }
         }
+      });
+      document.addEventListener('mousedown', e => {
+        // capture mouse buttons during rebinding (MMB = button 1, side = 3/4)
+        if (rebinding && e.button >= 1) {
+          const code = `Mouse${e.button}`;
+          KEYS[rebinding] = code;
+          const label = { 1: 'MMB', 2: 'RMB', 3: 'Mouse4', 4: 'Mouse5' }[e.button] || code;
+          const el = document.querySelector(`[data-act="${rebinding}"]`);
+          if (el) { el.textContent = label; el.classList.remove('listen'); }
+          rebinding = null;
+          e.preventDefault();
+          return;
+        }
+        // track all mouse buttons so kdown() can read them like keys
+        if (!rebinding) keys[`Mouse${e.button}`] = true;
+      });
+      document.addEventListener('mouseup', e => {
+        keys[`Mouse${e.button}`] = false;
       });
       document.addEventListener('contextmenu', e => {
         if (running) e.preventDefault();
@@ -2810,11 +2838,13 @@
     }
 
     function keyName(c) {
+      if (!c) return 'NONE';
+      if (c.startsWith('Mouse')) return { Mouse1: 'MMB', Mouse2: 'RMB', Mouse3: 'Mouse4', Mouse4: 'Mouse5' }[c] || c;
       return c.replace('Key', '').replace('Digit', '').replace('Left', '').replace('Right', '');
     }
 
     function kdown(a) {
-      return keys[KEYS[a]];
+      return KEYS[a] && keys[KEYS[a]];
     }
     /* ---- touch / on-screen controls (also work with mouse on desktop) ---- */
     let isTouch = false;
@@ -3038,7 +3068,7 @@
       if (moving) wish.normalize();
       if (me.moveState !== 'slide') {
         if (me.onGround) {
-          if (kdown('sprint') && f > 0.3 && !me.crouch) me.moveState = 'sprint';
+          if (kdown('sprint') && f > 0.3 && !me.crouch && !me.staminaDrained) me.moveState = 'sprint';
           else {
             me.moveState = 'walk';
             if (me.tacTimer < 0) me.tacTimer = 0;
@@ -3068,6 +3098,19 @@
         if (!moving && me.onGround) {
           me.vel.x -= me.vel.x * Math.min(1, M.friction * dt);
           me.vel.z -= me.vel.z * Math.min(1, M.friction * dt);
+        }
+      }
+      // stamina: drain while sprinting, regen at rest, must reach 50% before sprinting again
+      if (me.moveState === 'sprint') {
+        me.stamina = Math.max(0, me.stamina - M.staminaDrain * dt);
+        if (me.stamina <= 0) {
+          me.staminaDrained = true;
+          me.moveState = 'walk';
+        }
+      } else {
+        me.stamina = Math.min(1, me.stamina + M.staminaRegen * dt);
+        if (me.staminaDrained && me.stamina >= M.staminaResume) {
+          me.staminaDrained = false;
         }
       }
       me.vel.y -= M.gravity * dt;
@@ -3339,17 +3382,19 @@
       muzzle();
       updateHUD();
       const moveBloom = Math.min(0.045, Math.hypot(p.vel.x, p.vel.z) * 0.0035 + (p.moveState === 'sprint' ? 0.012 : 0));
+      const isShotgun = s.cls === 'shotgun';
+      // ONE tracer per shot (not per pellet) — keeps allocations low for shotguns
+      ray.setFromCamera({ x: 0, y: 0 }, camera);
+      spawnBulletTracer(camera.position.clone(), ray.ray.direction.clone(), isShotgun ? 7 : 60, isShotgun);
       for (let i = 0; i < s.pellets; i++) {
         const spread = (s.spread || 0) + moveBloom,
           dx = (Math.random() - 0.5) * spread,
           dy = (Math.random() - 0.5) * spread;
-        ray.far = (s.cls === 'shotgun') ? 7 : Infinity;
+        ray.far = isShotgun ? 7 : 1000;
         ray.setFromCamera({
           x: dx,
           y: dy
         }, camera);
-        const tracerDist = (s.cls === 'shotgun') ? 7 : 60;
-        spawnBulletTracer(camera.position.clone(), ray.ray.direction.clone(), tracerDist, s.cls === 'shotgun');
         const hits = [];
         for (const z of world.zombies) {
           if (z.dead) continue;
@@ -3368,7 +3413,7 @@
           pierced++;
         }
       }
-      ray.far = Infinity;
+      ray.far = 1000; // reset after loop
     }
 
     function zoneOf(z, pt) {
@@ -3607,6 +3652,7 @@
         stuckTimer: 0,
         stuckPos: null,
         escapeDir: null,
+        escapeTimer: 0
       });
       state.toSpawn--;
       return true;
@@ -3686,43 +3732,18 @@
         if (z.stun > 0) z.stun -= dt;
         if (dist > CONFIG.zombie.attackRange) {
           dir.normalize();
-
-          // stuck detection: if barely moved in 0.8s, pick an escape direction
-          if (!z.stuckPos) z.stuckPos = z.group.position.clone();
-          z.stuckTimer += dt;
-          if (z.stuckTimer >= 0.8) {
-            const moved = z.group.position.distanceTo(z.stuckPos);
-            if (moved < 0.5) {
-              // escape by rotating 90-135 degrees — commits for 1.5s
-              const angle = (Math.PI * 0.5) + (Math.random() * Math.PI * 0.25) * (Math.random() < 0.5 ? 1 : -1);
-              const cos = Math.cos(angle), sin = Math.sin(angle);
-              z.escapeDir = new THREE.Vector3(dir.x * cos - dir.z * sin, 0, dir.x * sin + dir.z * cos);
-              z.escapeTimer = 1.5;
-            }
-            z.stuckTimer = 0;
-            z.stuckPos = z.group.position.clone();
+          const sep = new THREE.Vector3();
+          for (const o of world.zombies) {
+            if (o === z || o.dead) continue;
+            const d = z.group.position.distanceTo(o.group.position);
+            if (d < 1.2 && d > 0.001) sep.add(z.group.position.clone().sub(o.group.position).multiplyScalar(1 / d));
           }
-
-          // use escape direction if active, otherwise seek target
-          if (z.escapeTimer > 0) {
-            z.escapeTimer -= dt;
-            dir.copy(z.escapeDir);
-          } else {
-            dir.add(avoidObstacles(z.group.position, dir));
-          }
-
           dir.add(sep.multiplyScalar(0.4)).normalize();
-          const outside = !!(z.barrier && z.barrier.boardsUp > 0);
-          let nx = z.group.position.x + dir.x * z.speed * slow * dt;
-          let nz = z.group.position.z + dir.z * z.speed * slow * dt;
-          if (outside) {
-            z.group.position.x = nx;
-            z.group.position.z = nz;
-          } else {
-            [nx, nz] = resolveMapCollision(nx, nz, 0.45, z.group.position.x, z.group.position.z, false);
-            z.group.position.x = nx;
-            z.group.position.z = nz;
-          }
+          let nx = z.group.position.x + dir.x * z.speed * slow * dt,
+            nz = z.group.position.z + dir.z * z.speed * slow * dt;
+          [nx, nz] = resolveMapCollision(nx, nz, 0.45, z.group.position.x, z.group.position.z, !!(z.barrier && z.barrier.boardsUp > 0));
+          z.group.position.x = nx;
+          z.group.position.z = nz;
           z.attackTimer = 0;
         } else {
           z.attackTimer -= dt;
@@ -3743,15 +3764,15 @@
           playZombieGroan(z.group.position);
           z.nextGroan = 2.4 + Math.random() * 4.2;
         }
-        // push zombie away from players so they can't phase through each other
+        // push zombie away from players so neither phases through the other
         for (const p of players) {
           if (!p.alive) continue;
           const dx = z.group.position.x - p.pos.x;
           const dz = z.group.position.z - p.pos.z;
-          const dist = Math.hypot(dx, dz);
+          const dist2 = Math.hypot(dx, dz);
           const minDist = 0.85;
-          if (dist < minDist && dist > 0.001) {
-            const push = (minDist - dist) / dist;
+          if (dist2 < minDist && dist2 > 0.001) {
+            const push = (minDist - dist2) / dist2;
             z.group.position.x += dx * push * 0.5;
             z.group.position.z += dz * push * 0.5;
           }
@@ -3759,10 +3780,23 @@
       }
     }
 
+    // Frees GPU memory for a removed object (geometry + materials). Without this,
+    // every dead zombie leaks its meshes and the frame rate degrades over a match.
+    function disposeGroup(obj) {
+      obj.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) {
+          if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
+          else o.material.dispose();
+        }
+      });
+    }
+
     function killZombie(z, zone, by) {
       if (z.dead) return;
       z.dead = true;
       scene.remove(z.group);
+      disposeGroup(z.group);
       const pts = pointsForZone(zone);
       awardPoints(by, pts);
       by.stats.kills++;
@@ -4318,6 +4352,7 @@
             if (!z.dead) {
               z.dead = true;
               scene.remove(z.group);
+              disposeGroup(z.group);
               state.kills++;
               state.roundKilled++;
             }
@@ -4650,18 +4685,22 @@
       o.start();
       o.stop(a.currentTime + 0.55);
     }
+
+    // Visible tracer line per bullet/pellet. Uses the world.fx system so it
+    // fades and cleans up automatically without extra bookkeeping.
     function spawnBulletTracer(origin, dir, distance, isShotgun) {
       const end = origin.clone().addScaledVector(dir, distance);
-      const geo = new THREE.BufferGeometry().setFromPoints([origin.clone(), end]);
+      const geo = new THREE.BufferGeometry().setFromPoints([origin, end]);
       const mat = new THREE.LineBasicMaterial({
         color: isShotgun ? 0xffaa44 : 0xfff5b0,
         transparent: true,
-        opacity: 0.75
+        opacity: 0.72
       });
       const line = new THREE.Line(geo, mat);
       scene.add(line);
       world.fx.push({ mesh: line, light: null, age: 0, life: 0.07, rad: 0 });
     }
+
     function makeExplosionFX(pos, rad) {
       const mat = new THREE.MeshBasicMaterial({
         color: 0xff8c24,
@@ -4691,12 +4730,14 @@
         const f = world.fx[i];
         f.age += dt;
         const t = f.age / f.life;
-        f.mesh.scale.setScalar(1 + t * f.rad * 2);
-        f.mesh.material.opacity = Math.max(0, 0.55 * (1 - t));
-        f.light.intensity = Math.max(0, 4 * (1 - t));
+        if (f.rad > 0) f.mesh.scale.setScalar(1 + t * f.rad * 2); // explosion ring only
+        if (f.mesh.material) f.mesh.material.opacity = Math.max(0, (f.rad > 0 ? 0.55 : 0.72) * (1 - t));
+        if (f.light) f.light.intensity = Math.max(0, 4 * (1 - t));
         if (t >= 1) {
           scene.remove(f.mesh);
-          scene.remove(f.light);
+          if (f.mesh.geometry) f.mesh.geometry.dispose();
+          if (f.mesh.material) f.mesh.material.dispose();
+          if (f.light) scene.remove(f.light);
           world.fx.splice(i, 1);
         }
       }
@@ -4894,6 +4935,10 @@
         const row = document.createElement('div');
         row.className = 'row';
         row.innerHTML = `<span>${KEY_LABELS[act]}</span>`;
+        const btnWrap = document.createElement('span');
+        btnWrap.style.display = 'flex';
+        btnWrap.style.gap = '5px';
+        // rebind button
         const b = document.createElement('button');
         b.className = 'kbBtn';
         b.dataset.act = act;
@@ -4904,7 +4949,19 @@
           b.textContent = 'PRESS…';
           rebinding = act;
         };
-        row.appendChild(b);
+        // clear button — removes the binding
+        const clr = document.createElement('button');
+        clr.className = 'kbBtn';
+        clr.style.minWidth = '32px';
+        clr.textContent = '✕';
+        clr.title = 'Remove binding';
+        clr.onclick = () => {
+          KEYS[act] = null;
+          b.textContent = 'NONE';
+        };
+        btnWrap.appendChild(b);
+        btnWrap.appendChild(clr);
+        row.appendChild(btnWrap);
         list.appendChild(row);
       });
     }
@@ -5064,7 +5121,10 @@
       players.forEach(p => {
         if (p.mesh) scene.remove(p.mesh);
       });
-      world.zombies.forEach(z => scene.remove(z.group));
+      world.zombies.forEach(z => {
+        scene.remove(z.group);
+        disposeGroup(z.group);
+      });
       world.zombies.length = 0;
       world.powerups.forEach(p => {
         scene.remove(p.mesh);

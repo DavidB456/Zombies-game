@@ -1229,7 +1229,9 @@
         hurtWindow: 6.0,
         regenRate: 40,
         eyeHeight: 1.85,
-        crouchEye: 0.85
+        crouchEye: 0.85,
+        downedEye: 0.45,
+        downedMoveMult: 0.22
       },
       move: {
         walk: 5.2,
@@ -1261,6 +1263,11 @@
         baseSpeed: 1.6,
         speedGrowth: 0.14,
         maxSpeed: 4.2,
+        speedTiers: {
+          walk: 1.25,
+          jog: 2.45,
+          sprint: 4.2
+        },
         speedVariation: 0.5,
         attackRange: 1.7,
         attackDelays: [2.0, 1.0, 0.5],
@@ -1385,7 +1392,7 @@
       back: 'Move Back',
       left: 'Strafe Left',
       right: 'Strafe Right',
-      sprint: 'Sprint (hold)',
+      sprint: 'Sprint (tap)',
       jump: 'Jump',
       slide: 'Slide (while sprinting)',
       crouchToggle: 'Crouch Toggle',
@@ -2143,6 +2150,7 @@
     let gamepadFireLeft = false,
       gamepadFireRight = false,
       lastPadJump = false,
+      lastPadSprint = false,
       lastPadAim = false;
 
     function curPrestigeLevel() {
@@ -2194,6 +2202,12 @@
         landDip: 0,
         stamina: 1.0,
         staminaDrained: false,
+        sprintLatched: false,
+        preDownLoadout: null,
+        preDownAmmo: null,
+        preDownCur: 0,
+        reviveTarget: null,
+        reviveProg: 0,
         lastFwdTap: -1,
         fireCooldown: 0,
         knifeCd: 0,
@@ -2309,6 +2323,12 @@
       return g;
     }
 
+    function setPlayerMeshProne(p, prone) {
+      if (!p.mesh) return;
+      p.mesh.rotation.x = prone ? Math.PI / 2 : 0;
+      p.mesh.position.y = prone ? 0.28 : 0;
+    }
+
     function spawnPlayers() {
       const starts = [
         [0, CONFIG.player.eyeHeight, 0],
@@ -2322,9 +2342,17 @@
         p.yaw = 0;
         p.pitch = 0;
         p.down = false;
+        p.downAnim = 0;
+        p.bleed = 0;
         p.alive = true;
         p.spectating = false;
+        p.moveState = 'walk';
+        p.sprintLatched = false;
+        p.reviveTarget = null;
+        p.reviveProg = 0;
+        restoreDownedLoadout(p);
         if (p.bot) makeBotMesh(p);
+        setPlayerMeshProne(p, false);
       });
     }
 
@@ -2709,6 +2737,27 @@
        ========================================================================== */
     let rebinding = null;
 
+    function requestSprint() {
+      if (!me || me.down || me.staminaDrained || me.stamina <= 0 || me.moveState === 'slide') return;
+      me.sprintLatched = true;
+      me.crouch = false;
+    }
+
+    function handleActionPress(code) {
+      if (!running || paused || !me) return;
+      if (code === KEYS.sprint) requestSprint();
+      if (code === KEYS.reload) reload(me);
+      if (code === KEYS.weapon1) swap(me, 0);
+      if (code === KEYS.weapon2) swap(me, 1);
+      if (code === KEYS.knife) doKnife(me);
+      if (code === KEYS.grenade) throwGrenade(me);
+      if (code === KEYS.slide) tryStartSlide();
+      if (code === KEYS.jump) me.jumpBuffer = 0.15;
+      if (KEYS.crouchToggle && code === KEYS.crouchToggle && !me.down && me.moveState !== 'slide') {
+        me.crouch = !me.crouch;
+      }
+    }
+
     function setupInput() {
       const c = renderer.domElement;
       // mouse look: works when pointer-locked OR while dragging (fallback for iframes/desktop)
@@ -2750,21 +2799,11 @@
           paused ? resume() : pauseGame();
           return;
         }
-        if (!running || paused) return;
-        if (e.code === KEYS.reload) reload(me);
-        if (e.code === KEYS.weapon1) swap(me, 0);
-        if (e.code === KEYS.weapon2) swap(me, 1);
-        if (e.code === KEYS.knife) doKnife(me);
-        if (e.code === KEYS.grenade) throwGrenade(me);
-        if (e.code === KEYS.slide) tryStartSlide();
-        if (e.code === KEYS.jump) me.jumpBuffer = 0.15;
-        if (KEYS.crouchToggle && e.code === KEYS.crouchToggle && !me.down && me.moveState !== 'slide') {
-          me.crouch = !me.crouch;
-        }
+        if (!e.repeat) handleActionPress(e.code);
       });
       document.addEventListener('keyup', e => {
         keys[e.code] = false;
-        if (e.code === KEYS.slide) me.crouch = false;
+        if (me && e.code === KEYS.slide) me.crouch = false;
       });
       c.addEventListener('mousedown', e => {
         if (!running || paused) return;
@@ -2786,11 +2825,11 @@
         }
       });
       document.addEventListener('mousedown', e => {
-        // capture mouse buttons during rebinding (MMB = button 1, side = 3/4)
-        if (rebinding && e.button >= 1) {
+        // capture mouse buttons during rebinding (LMB = 0, MMB = 1, RMB = 2, side = 3/4)
+        if (rebinding) {
           const code = `Mouse${e.button}`;
           KEYS[rebinding] = code;
-          const label = { 1: 'MMB', 2: 'RMB', 3: 'Mouse4', 4: 'Mouse5' }[e.button] || code;
+          const label = { 0: 'LMB', 1: 'MMB', 2: 'RMB', 3: 'Mouse4', 4: 'Mouse5' }[e.button] || code;
           const el = document.querySelector(`[data-act="${rebinding}"]`);
           if (el) { el.textContent = label; el.classList.remove('listen'); }
           rebinding = null;
@@ -2798,7 +2837,9 @@
           return;
         }
         // track all mouse buttons so kdown() can read them like keys
-        if (!rebinding) keys[`Mouse${e.button}`] = true;
+        const code = `Mouse${e.button}`;
+        keys[code] = true;
+        handleActionPress(code);
       });
       document.addEventListener('mouseup', e => {
         keys[`Mouse${e.button}`] = false;
@@ -2839,7 +2880,7 @@
 
     function keyName(c) {
       if (!c) return 'NONE';
-      if (c.startsWith('Mouse')) return { Mouse1: 'MMB', Mouse2: 'RMB', Mouse3: 'Mouse4', Mouse4: 'Mouse5' }[c] || c;
+      if (c.startsWith('Mouse')) return { Mouse0: 'LMB', Mouse1: 'MMB', Mouse2: 'RMB', Mouse3: 'Mouse4', Mouse4: 'Mouse5' }[c] || c;
       return c.replace('Key', '').replace('Digit', '').replace('Left', '').replace('Right', '');
     }
 
@@ -2947,7 +2988,9 @@
       moveAxis.s = Math.abs(gp.axes[0]) > 0.15 ? gp.axes[0] : 0;
       moveAxis.f = Math.abs(gp.axes[1]) > 0.15 ? -gp.axes[1] : 0;
       if (Math.abs(gp.axes[2]) > 0.08 || Math.abs(gp.axes[3]) > 0.08) applyLook(gp.axes[2] * 12 * settings.pad, gp.axes[3] * 12 * settings.pad);
-      keys[KEYS.sprint] = !!(gp.buttons[10]?.pressed || gp.buttons[8]?.pressed);
+      const sprintPressed = !!(gp.buttons[10]?.pressed || gp.buttons[8]?.pressed);
+      if (sprintPressed && !lastPadSprint) requestSprint();
+      lastPadSprint = sprintPressed;
       const jumpPressed = !!gp.buttons[0]?.pressed;
       if (jumpPressed && !lastPadJump) me.jumpBuffer = 0.15;
       lastPadJump = jumpPressed;
@@ -2985,6 +3028,7 @@
     }
 
     function tryStartSlide() {
+      if (me.down) return;
       if ((me.moveState === 'sprint' || me.moveState === 'tac') && me.onGround && me.moveState !== 'slide') {
         me.moveState = 'slide';
         me.slideTimer = 0;
@@ -3004,6 +3048,7 @@
     }
 
     function jump(p) {
+      if (p.down) return;
       const sliding = p.moveState === 'slide';
       if (!p.onGround && !sliding) return; // jump allowed when grounded OR mid-slide
       if (sliding) {
@@ -3050,7 +3095,7 @@
       if (me.onGround) me.coyote = 0.12;
       else me.coyote = Math.max(0, me.coyote - dt);
       me.jumpBuffer = Math.max(0, me.jumpBuffer - dt);
-      if (me.jumpBuffer > 0 && (me.onGround || me.coyote > 0 || me.moveState === 'slide')) {
+      if (!me.down && me.jumpBuffer > 0 && (me.onGround || me.coyote > 0 || me.moveState === 'slide')) {
         jump(me);
         me.jumpBuffer = 0;
         me.coyote = 0;
@@ -3066,9 +3111,15 @@
       let wish = new THREE.Vector3().addScaledVector(F, f).addScaledVector(R, s);
       const moving = wish.lengthSq() > 0.02;
       if (moving) wish.normalize();
+      if (me.down) {
+        me.crouch = false;
+        me.moveState = 'downed';
+        me.sprintLatched = false;
+      }
       if (me.moveState !== 'slide') {
         if (me.onGround) {
-          if (kdown('sprint') && f > 0.3 && !me.crouch && !me.staminaDrained) me.moveState = 'sprint';
+          if (me.down) me.moveState = 'downed';
+          else if (me.sprintLatched && f > 0.3 && !me.crouch && !me.staminaDrained) me.moveState = 'sprint';
           else {
             me.moveState = 'walk';
             if (me.tacTimer < 0) me.tacTimer = 0;
@@ -3076,7 +3127,8 @@
         }
       }
       let sp = M.walk;
-      if (me.moveState === 'sprint') sp = M.sprint;
+      if (me.down) sp = M.walk * CONFIG.player.downedMoveMult;
+      else if (me.moveState === 'sprint') sp = M.sprint;
       else if (me.moveState === 'tac') sp = M.tacSprint;
       if (me.moveState === 'slide') {
         me.slideTimer += dt;
@@ -3088,7 +3140,7 @@
         }
         if (me.slideTimer > M.slideMaxTime || ns < 3.5) {
           me.crouch = false;
-          me.moveState = kdown('sprint') ? 'sprint' : 'walk'; // flow into sprint if held
+          me.moveState = me.sprintLatched ? 'sprint' : 'walk'; // flow into sprint if armed
         }
       } else {
         const tg = wish.clone().multiplyScalar(sp),
@@ -3101,10 +3153,15 @@
         }
       }
       // stamina: drain while sprinting, regen at rest, must reach 50% before sprinting again
-      if (me.moveState === 'sprint') {
+      if (me.down) {
+        me.stamina = Math.min(1, me.stamina + M.staminaRegen * dt);
+        me.staminaDrained = false;
+        me.sprintLatched = false;
+      } else if (me.moveState === 'sprint') {
         me.stamina = Math.max(0, me.stamina - M.staminaDrain * dt);
         if (me.stamina <= 0) {
           me.staminaDrained = true;
+          me.sprintLatched = false;
           me.moveState = 'walk';
         }
       } else {
@@ -3114,7 +3171,7 @@
         }
       }
       me.vel.y -= M.gravity * dt;
-      const eye = (me.crouch || me.moveState === 'slide') ? CONFIG.player.crouchEye : CONFIG.player.eyeHeight;
+      const eye = me.down ? CONFIG.player.downedEye : (me.crouch || me.moveState === 'slide') ? CONFIG.player.crouchEye : CONFIG.player.eyeHeight;
       let ny = me.pos.y + me.vel.y * dt;
       if (ny <= eye) {
         if (!me.onGround && me.vel.y < -4) me.landDip = Math.min(0.14, -me.vel.y * 0.012); // landing impact
@@ -3135,7 +3192,7 @@
       [nx, nz] = resolveMapCollision(nx, nz, 0.5, me.pos.x, me.pos.z);
       me.pos.x = nx;
       me.pos.z = nz;
-      const downTilt = me.down ? Math.min(0.9, me.downAnim) * 0.55 : 0;
+      const downTilt = me.down ? Math.min(0.9, me.downAnim) * 0.75 : 0;
       camera.position.copy(me.pos);
       camera.position.y -= me.landDip || 0; // subtle landing dip for weight
       camera.rotation.order = 'YXZ';
@@ -3259,6 +3316,7 @@
 
     function swap(p, i) {
       if (p.loadout[i]) {
+        if (p.down && resolveStats(p.loadout[i]).cls !== 'pistol') return;
         p.cur = i;
         if (resolveStats(curLo(p)).dualWield) p.aiming = false;
         updateHUD();
@@ -3329,7 +3387,7 @@
       const s = curStats(me);
       const wantsLeft = s.dualWield ? (me.firingLeft || gamepadFireLeft) : me.firing;
       const wantsRight = s.dualWield ? (me.firingRight || gamepadFireRight) : gamepadFire;
-      if ((!wantsLeft && !wantsRight) || me.down || me.reloading || me.spectating) return;
+      if ((!wantsLeft && !wantsRight) || me.reloading || me.spectating) return;
       const a = ammoOf(me);
       if (me.fireCooldown > 0) return;
       let side = s.dualWield ? (wantsLeft && wantsRight ? me.nextDualSide : (wantsLeft ? 'left' : 'right')) : 'main';
@@ -3635,7 +3693,7 @@
       grp.position.set(sp.x + out.x * 2.8, 0, sp.z + out.z * 2.8);
       scene.add(grp);
       const hp = zHealth(state.round);
-      const spd = Math.max(1.0, zombieSpeedForRound(state.round) + (Math.random() - 0.5) * CONFIG.zombie.speedVariation);
+      const spd = zombieSpeedForRound(state.round);
       world.zombies.push({
         group: grp,
         health: hp,
@@ -3667,12 +3725,20 @@
       return Math.round(hp);
     }
 
-    // Zombies ramp up each round (speedGrowth) but never exceed maxSpeed.
-    // Per-zombie speedVariation (applied at spawn) spreads the horde out so a
-    // round isn't a single uniform blob of identical-speed zombies.
+    // Zombies use round-based pace buckets:
+    // R1 walk, R2-6 mostly jog, R7-14 mostly sprint, R15+ all sprint.
     function zombieSpeedForRound(r) {
       const Z = CONFIG.zombie;
-      return Math.min(Z.baseSpeed + (r - 1) * Z.speedGrowth, Z.maxSpeed);
+      const tiers = Z.speedTiers || {
+        walk: Z.baseSpeed,
+        jog: Math.min(Z.maxSpeed, Z.baseSpeed + 1.0),
+        sprint: Z.maxSpeed
+      };
+      const roll = Math.random();
+      if (r <= 1) return tiers.walk;
+      if (r <= 6) return roll < 0.15 ? tiers.walk : tiers.jog;
+      if (r <= 14) return roll < 0.25 ? tiers.jog : tiers.sprint;
+      return tiers.sprint;
     }
 
     function zombieTarget(z) {
@@ -3831,40 +3897,52 @@
       if (p === me) renderPerks();
     }
 
+    function snapshotDownedLoadout(p) {
+      if (p.preDownLoadout) return;
+      p.preDownLoadout = JSON.parse(JSON.stringify(p.loadout));
+      p.preDownAmmo = JSON.parse(JSON.stringify(p.ammo));
+      p.preDownCur = p.cur;
+    }
+
+    function restoreDownedLoadout(p) {
+      if (!p.preDownLoadout) return;
+      p.loadout = p.preDownLoadout;
+      p.ammo = p.preDownAmmo || {};
+      p.cur = Math.min(p.preDownCur || 0, Math.max(0, p.loadout.length - 1));
+      p.preDownLoadout = null;
+      p.preDownAmmo = null;
+      p.preDownCur = 0;
+      p.reloading = false;
+      if (p === me) {
+        updateHUD();
+        updateWeaponModel();
+      }
+    }
+
     function ensureDownedWeapon(p) {
-      if (players.length === 1) {
-        let lo = p.loadout.find(l => l.id === 'M1911');
-        if (!lo) {
-          p.loadout[p.cur] = {
-            id: 'M1911',
-            tier: 1,
-            element: null
-          };
-          lo = p.loadout[p.cur];
-        }
-        lo.tier = Math.max(lo.tier, 1);
-        const s = resolveStats(lo);
-        p.ammo[loKey(lo)] = makeAmmo(s);
-        p.cur = p.loadout.indexOf(lo);
+      const pistols = p.loadout.map((l, i) => ({
+        l,
+        i,
+        s: resolveStats(l)
+      })).filter(x => x.s.cls === 'pistol');
+      if (pistols.length) {
+        p.cur = pistols.sort((a, b) => (b.s.dmg * b.s.pellets) - (a.s.dmg * a.s.pellets))[0].i;
       } else {
-        const pistols = p.loadout.map((l, i) => ({
-          l,
-          i,
-          s: resolveStats(l)
-        })).filter(x => x.s.cls === 'pistol');
-        if (pistols.length) {
-          p.cur = pistols.sort((a, b) => (b.s.dmg * b.s.pellets) - (a.s.dmg * a.s.pellets))[0].i;
+        const fallback = {
+          id: 'M1911',
+          tier: 0,
+          element: null
+        };
+        if (p.loadout.length < 2) {
+          p.loadout.push(fallback);
+          p.cur = p.loadout.length - 1;
         } else {
-          p.loadout[p.cur] = {
-            id: 'M1911',
-            tier: 0,
-            element: null
-          };
-          p.ammo.M1911_t0 = {
-            mag: 8,
-            reserve: 32
-          };
+          p.loadout[p.cur] = fallback;
         }
+        p.ammo.M1911_t0 = {
+          mag: 8,
+          reserve: 32
+        };
       }
       if (p === me) {
         updateHUD();
@@ -3877,6 +3955,14 @@
       p.downAnim = 0;
       p.bleed = CONFIG.revive.bleedOut;
       p.firing = false;
+      p.firingLeft = false;
+      p.firingRight = false;
+      p.aiming = false;
+      p.reloading = false;
+      p.crouch = false;
+      p.moveState = 'downed';
+      p.sprintLatched = false;
+      snapshotDownedLoadout(p);
       p.stats.downs++;
       ensureDownedWeapon(p);
       losePerks(p);
@@ -3887,6 +3973,9 @@
           p.down = false;
           p.downAnim = 0;
           p.health = p.maxHealth * 0.5;
+          p.moveState = 'walk';
+          p.sprintLatched = false;
+          restoreDownedLoadout(p);
           updateHUD();
         }, 1800);
         return;
@@ -3922,6 +4011,12 @@
       t.down = false;
       t.downAnim = 0;
       t.health = t.maxHealth * 0.5;
+      t.moveState = 'walk';
+      t.sprintLatched = false;
+      t.reviveTarget = null;
+      t.reviveProg = 0;
+      restoreDownedLoadout(t);
+      setPlayerMeshProne(t, false);
       rev.stats.revives++;
       log('TEAMMATE REVIVED');
     }
@@ -3932,6 +4027,8 @@
         if (p.down) {
           p.downAnim += dt;
           p.bleed -= dt;
+          setPlayerMeshProne(p, true);
+          if (p.mesh) p.mesh.position.set(p.pos.x, p.mesh.position.y, p.pos.z);
           if (p.bleed <= 0) {
             p.alive = false;
             p.spectating = true;
@@ -3940,9 +4037,37 @@
           continue;
         }
         if (!p.alive) continue;
+        setPlayerMeshProne(p, false);
+        const downedMate = players.filter(t => t !== p && t.alive && t.down)
+          .sort((a, b) => p.pos.distanceTo(a.pos) - p.pos.distanceTo(b.pos))[0];
         const nearest = world.zombies.filter(z => !z.dead).sort((a, b) => a.group.position.distanceTo(p.pos) - b.group.position.distanceTo(p.pos))[0];
         let wish = new THREE.Vector3();
-        if (nearest) {
+        let reviving = false;
+        if (downedMate) {
+          const toMate = downedMate.pos.clone().sub(p.pos).setY(0);
+          if (p.reviveTarget !== downedMate) {
+            p.reviveTarget = downedMate;
+            p.reviveProg = 0;
+          }
+          if (toMate.length() > 2.4) {
+            wish.copy(toMate.normalize());
+            p.reviveProg = 0;
+          } else {
+            reviving = true;
+            p.reviveProg += dt;
+            p.vel.x *= Math.max(0, 1 - dt * 8);
+            p.vel.z *= Math.max(0, 1 - dt * 8);
+            if (p.reviveProg >= CONFIG.revive.time) {
+              reviveTeammate(p, downedMate);
+              p.reviveTarget = null;
+              p.reviveProg = 0;
+            }
+          }
+        } else {
+          p.reviveTarget = null;
+          p.reviveProg = 0;
+        }
+        if (!downedMate && nearest) {
           const away = p.pos.clone().sub(nearest.group.position).setY(0);
           if (away.length() < 6) wish.copy(away.normalize());
           else wish.copy(new THREE.Vector3(-p.pos.x, 0, -p.pos.z).normalize());
@@ -3955,7 +4080,7 @@
         [nx, nz] = resolveMapCollision(nx, nz, 0.45, p.pos.x, p.pos.z);
         p.pos.x = nx;
         p.pos.z = nz;
-        if (nearest && nearest.group.position.distanceTo(p.pos) < 15) {
+        if (!reviving && nearest && nearest.group.position.distanceTo(p.pos) < 15) {
           p.botThink -= dt;
           if (p.botThink <= 0) {
             p.botThink = .45;
@@ -3964,9 +4089,9 @@
           }
         }
         if (p.mesh) {
-          p.mesh.position.set(p.pos.x, 0, p.pos.z);
-          if (nearest) {
-            const d = nearest.group.position.clone().sub(p.pos);
+          p.mesh.position.set(p.pos.x, p.mesh.position.y, p.pos.z);
+          if (downedMate || nearest) {
+            const d = (downedMate ? downedMate.pos : nearest.group.position).clone().sub(p.pos);
             p.mesh.rotation.y = Math.atan2(d.x, d.z);
           }
         }
@@ -4020,9 +4145,41 @@
     };
     let boxOffer = null;
 
+    function activeReviverFor(t) {
+      return players.find(p => p !== t && p.alive && !p.down && p.reviveTarget === t && p.reviveProg > 0);
+    }
+
     function updateInteractions(dt) {
       const PR = document.getElementById('prompt'),
         holding = keys[KEYS.interact];
+      const pwDown = document.getElementById('progWrap'),
+        pfDown = document.getElementById('progFill');
+      if (me.down) {
+        const rev = activeReviverFor(me);
+        if (rev) {
+          const pct = Math.min(100, rev.reviveProg / CONFIG.revive.time * 100);
+          PR.innerHTML = `BEING REVIVED BY <span class="key">${rev.name}</span> ${Math.round(pct)}%`;
+          PR.style.opacity = 1;
+          pwDown.style.display = 'block';
+          pfDown.style.width = pct + '%';
+        } else {
+          PR.innerHTML = 'DOWNED';
+          PR.style.opacity = 1;
+          pwDown.style.display = 'none';
+        }
+        interact.target = null;
+        interact.prog = 0;
+        interact.wasHolding = holding;
+        return;
+      }
+      if (me.spectating) {
+        PR.style.opacity = 0;
+        pwDown.style.display = 'none';
+        interact.target = null;
+        interact.prog = 0;
+        interact.wasHolding = holding;
+        return;
+      }
       let near = null,
         kind = null,
         text = null,
@@ -4433,12 +4590,20 @@
           p.alive = true;
           p.spectating = false;
           p.down = false;
+          p.downAnim = 0;
+          p.bleed = 0;
           p.health = p.maxHealth;
+          p.moveState = 'walk';
+          p.sprintLatched = false;
+          p.reviveTarget = null;
+          p.reviveProg = 0;
+          restoreDownedLoadout(p);
           if (state.round > 5) {
             p.points = 2000;
             p.stats.points = p.points;
           }
           if (p.mesh) p.mesh.visible = true;
+          setPlayerMeshProne(p, false);
           const a = (i / players.length) * Math.PI * 2;
           p.pos.set(Math.cos(a) * 1.5, CONFIG.player.eyeHeight, Math.sin(a) * 1.5);
         }

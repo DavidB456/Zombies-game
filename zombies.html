@@ -764,6 +764,43 @@
       transition: opacity .25s;
     }
 
+    body.downedView canvas {
+      filter: grayscale(1) contrast(.92) brightness(.82);
+    }
+
+    #dmgVig.critical {
+      opacity: 1 !important;
+      box-shadow:
+        inset 0 0 90px 18px rgba(170, 0, 0, .92),
+        inset 0 0 230px 82px rgba(95, 0, 0, .82);
+      transition: opacity .18s;
+    }
+
+    #damageDir {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 0;
+      height: 0;
+      pointer-events: none;
+      z-index: 10;
+      opacity: 0;
+      transition: opacity .18s;
+    }
+
+    #damageDir::before {
+      content: "";
+      position: absolute;
+      left: -18px;
+      top: -132px;
+      width: 0;
+      height: 0;
+      border-left: 18px solid transparent;
+      border-right: 18px solid transparent;
+      border-bottom: 34px solid rgba(230, 28, 24, .92);
+      filter: drop-shadow(0 0 12px rgba(180, 0, 0, .8));
+    }
+
     #hitMark {
       position: absolute;
       left: 50%;
@@ -1184,6 +1221,7 @@
     </div>
   </div>
   <div id="dmgVig"></div>
+  <div id="damageDir"></div>
   <div id="banner"></div>
   <div id="ctrlHint">Click to lock mouse for FPS aim · or drag to look · WASD move</div>
   <div id="clickToLock">
@@ -2174,6 +2212,7 @@
         pitch: 0,
         health: CONFIG.player.baseHealth,
         maxHealth: CONFIG.player.baseHealth,
+        targetableAt: 0,
         points: CONFIG.player.startPoints,
         perks: {},
         selfRevives: 0,
@@ -2346,6 +2385,7 @@
         p.bleed = 0;
         p.alive = true;
         p.spectating = false;
+        p.targetableAt = 0;
         p.moveState = 'walk';
         p.sprintLatched = false;
         p.reviveTarget = null;
@@ -3744,8 +3784,10 @@
     function zombieTarget(z) {
       let best = null,
         bd = 1e9;
+      const now = clock.getElapsedTime();
       for (const p of players) {
         if (!p.alive || p.down) continue;
+        if (now < (p.targetableAt || 0)) continue;
         const d = z.group.position.distanceTo(new THREE.Vector3(p.pos.x, 0, p.pos.z));
         if (d < bd) {
           bd = d;
@@ -3822,7 +3864,7 @@
                 z.barrier = null;
                 z.climbTimer = 0.8;
               }
-            } else dealDamage(target, CONFIG.zombie.damage);
+            } else dealDamage(target, CONFIG.zombie.damage, z.group.position);
           }
         }
         z.nextGroan -= dt;
@@ -3930,7 +3972,7 @@
       } else {
         const fallback = {
           id: 'M1911',
-          tier: 0,
+          tier: players.length === 1 ? 1 : 0,
           element: null
         };
         if (p.loadout.length < 2) {
@@ -3939,10 +3981,8 @@
         } else {
           p.loadout[p.cur] = fallback;
         }
-        p.ammo.M1911_t0 = {
-          mag: 8,
-          reserve: 32
-        };
+        const s = resolveStats(fallback);
+        p.ammo[loKey(fallback)] = players.length === 1 ? makeAmmo(s) : { mag: 8, reserve: 32 };
       }
       if (p === me) {
         updateHUD();
@@ -3975,6 +4015,7 @@
           p.health = p.maxHealth * 0.5;
           p.moveState = 'walk';
           p.sprintLatched = false;
+          p.targetableAt = clock.getElapsedTime() + 2;
           restoreDownedLoadout(p);
           updateHUD();
         }, 1800);
@@ -4013,6 +4054,7 @@
       t.health = t.maxHealth * 0.5;
       t.moveState = 'walk';
       t.sprintLatched = false;
+      t.targetableAt = clock.getElapsedTime() + 2;
       t.reviveTarget = null;
       t.reviveProg = 0;
       restoreDownedLoadout(t);
